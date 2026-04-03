@@ -1,14 +1,4 @@
 defmodule PolarWeb.Router do
-  @moduledoc """
-  Router for the unified image server.
-
-  Changes from upmaru/polar:
-  - Added POST /publish/products/:product_id/versions/:version_id/upload
-    for direct multipart artifact upload (from Hye-Ararat/Image-Server).
-  - Added GET /storage/*path for serving locally-stored artifacts
-    (used when storage_adapter is Polar.Storage.Local).
-  """
-
   use PolarWeb, :router
 
   import PolarWeb.UserAuth
@@ -28,73 +18,36 @@ defmodule PolarWeb.Router do
   end
 
   pipeline :publish do
-    plug :accepts, ["json"]
-    plug PolarWeb.Plugs.AuthenticateSpace
+    plug PolarWeb.Plugs.ValidatePublishing
   end
 
-  pipeline :simplestreams do
-    plug :accepts, ["json"]
-  end
+  ## Authentication routes
 
-  # ── Simplestreams (public, unauthenticated) ───────────────────────────────────
   scope "/", PolarWeb do
-    pipe_through :simplestreams
+    pipe_through [:browser]
 
-    get "/streams/v1/index.json", StreamController, :index
-    get "/streams/v1/images.json", StreamController, :images
+    live_session :current_user,
+      on_mount: [{PolarWeb.UserAuth, :mount_current_user}] do
+      live "/", RootLive, :show
+
+      live "/users/confirm/:token", UserConfirmationLive, :edit
+      live "/users/confirm", UserConfirmationInstructionsLive, :new
+    end
+
+    delete "/users/log_out", UserSessionController, :delete
   end
 
-  # ── Local storage file serving ────────────────────────────────────────────────
-  # Only active when storage_adapter is Polar.Storage.Local.
-  # S3 adapter serves files directly via pre-signed URLs.
-  scope "/storage", PolarWeb do
-    pipe_through :api
-
-    get "/*path", StorageController, :show
-  end
-
-  # ── Publish API (token-authenticated) ────────────────────────────────────────
-  scope "/publish", PolarWeb.Publish do
-    pipe_through :publish
-
-    post "/sessions", SessionController, :create
-
-    get  "/storage", StorageController, :show
-
-    get  "/products/:id", ProductController, :show
-
-    get  "/products/:product_id/versions/:id", VersionController, :show
-    post "/products/:product_id/versions", VersionController, :create
-
-    resources "/products/:product_id/versions/:version_id/items", ItemController,
-      only: [:create, :show]
-
-    # Direct multipart upload — alternative to the icepak CI/CD flow.
-    # Accepts rootfs, metadata, and kvmdisk files; hashes and stores them
-    # via the configured storage adapter; creates Item records.
-    post "/products/:product_id/versions/:version_id/upload", UploadController, :create
-  end
-
-  # ── Dashboard (authenticated browser) ────────────────────────────────────────
   scope "/", PolarWeb do
-    pipe_through [:browser, :require_authenticated_user]
+    pipe_through [:browser, :redirect_if_user_is_authenticated]
 
-    live "/spaces", SpaceLive.Index, :index
-    live "/spaces/new", SpaceLive.Index, :new
-    live "/spaces/:id", SpaceLive.Show, :show
-    live "/spaces/:id/credentials/new", SpaceLive.Show, :new_credential
-  end
-
-  # ── Auth routes ───────────────────────────────────────────────────────────────
-  scope "/", PolarWeb do
-    pipe_through :browser
-
-    get "/", PageController, :home
-
-    live "/users/register", UserRegistrationLive, :new
-    live "/users/log_in", UserLoginLive, :new
-    live "/users/reset_password", UserForgotPasswordLive, :new
-    live "/users/reset_password/:token", UserResetPasswordLive, :edit
+    live_session :redirect_if_user_is_authenticated,
+      layout: {PolarWeb.Layouts, :auth},
+      on_mount: [{PolarWeb.UserAuth, :redirect_if_user_is_authenticated}] do
+      live "/users/register", UserRegistrationLive, :new
+      live "/users/log_in", UserLoginLive, :new
+      live "/users/reset_password", UserForgotPasswordLive, :new
+      live "/users/reset_password/:token", UserResetPasswordLive, :edit
+    end
 
     post "/users/log_in", UserSessionController, :create
   end
@@ -102,16 +55,85 @@ defmodule PolarWeb.Router do
   scope "/", PolarWeb do
     pipe_through [:browser, :require_authenticated_user]
 
-    live "/users/settings", UserSettingsLive, :edit
-    live "/users/settings/confirm_email/:token", UserSettingsLive, :confirm_email
+    live_session :require_authenticated_user,
+      on_mount: [{PolarWeb.UserAuth, :ensure_authenticated}] do
+      live "/dashboard", DashboardLive, :show
+
+      live "/dashboard/spaces/new", Dashboard.Space.NewLive, :new
+      live "/dashboard/spaces/:id", Dashboard.SpaceLive, :show
+
+      live "/dashboard/spaces/:space_id/credentials/new", Dashboard.Credential.NewLive, :new
+      live "/dashboard/spaces/:space_id/credentials/:id", Dashboard.CredentialLive, :show
+
+      live "/users/settings", UserSettingsLive, :edit
+      live "/users/settings/confirm_email/:token", UserSettingsLive, :confirm_email
+    end
   end
 
-  scope "/", PolarWeb do
-    pipe_through :browser
+  scope "/spaces/:space_token", PolarWeb do
+    pipe_through :api
 
-    delete "/users/log_out", UserSessionController, :delete
-    get "/users/confirm", UserConfirmationController, :new
-    post "/users/confirm", UserConfirmationController, :create
-    get "/users/confirm/:token", UserConfirmationController, :confirm
+    get "/", SpaceController, :show
+
+    scope "/streams/v1" do
+      get "/index.json", StreamController, :index
+      get "/images.json", Streams.ImageController, :index
+    end
+
+    resources "/items", Streams.ItemController, only: [:show]
+  end
+
+  # Local filesystem artifact serving.
+  # Only active when storage_adapter is Polar.Storage.Local.
+  # S3 adapter serves files via pre-signed URLs directly.
+  scope "/storage", PolarWeb do
+    pipe_through :api
+    get "/*path", StorageController, :show
+  end
+
+  scope "/publish", PolarWeb.Publish, as: :publish do
+    pipe_through :api
+
+    resources "/sessions", SessionController, only: [:create]
+
+    scope "/" do
+      pipe_through :publish
+
+      resources "/storage", StorageController, only: [:show], singleton: true
+
+      resources "/products", ProductController, only: [:show] do
+        resources "/versions", VersionController, only: [:show, :create]
+      end
+
+      resources "/versions/:version_id/events", EventController, only: [:create]
+
+      # Direct multipart upload — alternative to the icepak CI/CD flow.
+      # Accepts rootfs, metadata, kvmdisk; hashes and stores via storage adapter.
+      scope "/products/:product_id/versions/:version_id" do
+        post "/upload", UploadController, :create
+      end
+
+      scope "/testing", as: :testing do
+        resources "/checks", Testing.CheckController, only: [:index]
+        resources "/clusters", Testing.ClusterController, only: [:index]
+
+        resources "/assessments/:assessment_id/events", EventController, only: [:create]
+
+        scope "/versions/:version_id" do
+          resources "/assessments", Testing.AssessmentController, only: [:create]
+        end
+      end
+    end
+  end
+
+  if Application.compile_env(:polar, :dev_routes) do
+    import Phoenix.LiveDashboard.Router
+
+    scope "/dev" do
+      pipe_through :browser
+
+      live_dashboard "/dashboard", metrics: PolarWeb.Telemetry
+      forward "/mailbox", Plug.Swoosh.MailboxPreview
+    end
   end
 end

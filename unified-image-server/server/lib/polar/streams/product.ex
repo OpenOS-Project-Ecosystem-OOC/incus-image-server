@@ -1,16 +1,4 @@
 defmodule Polar.Streams.Product do
-  @moduledoc """
-  A product represents a unique (os, release, arch, variant) tuple in the
-  simplestreams index.
-
-  Arch is a free-form string — no validation against a fixed list. The
-  simplestreams protocol itself imposes no arch restrictions, and this server
-  is intended to support any architecture that Distrobuilder or the wrapper
-  scripts can produce (amd64, arm64, i386, riscv64, s390x, etc.).
-
-  Changed from upmaru/polar: removed validate_inclusion(:arch, ["amd64", "arm64"]).
-  """
-
   use Ecto.Schema
   import Ecto.Changeset
   import Ecto.Query, only: [from: 2]
@@ -39,11 +27,10 @@ defmodule Polar.Streams.Product do
     product
     |> cast(attrs, @valid_attrs)
     |> validate_required(@required_attrs)
-    # arch: validate format only — must be a non-empty lowercase alphanumeric
-    # string (e.g. amd64, arm64, i386, riscv64, s390x, ppc64le).
-    # No fixed list — new architectures are supported without code changes.
+    # arch accepts any lowercase alphanumeric identifier — no fixed list.
+    # Supports amd64, arm64, i386, riscv64, s390x, ppc64le, etc.
     |> validate_format(:arch, ~r/^[a-z0-9_]+$/,
-      message: "must be a lowercase alphanumeric architecture identifier (e.g. amd64, arm64)"
+      message: "must be a lowercase alphanumeric architecture identifier"
     )
     |> unique_constraint([:os, :release, :arch, :variant])
   end

@@ -1,28 +1,12 @@
 defmodule PolarWeb.Publish.UploadController do
   @moduledoc """
-  Direct multipart file upload endpoint for the publish pipeline.
+  Direct multipart upload endpoint — alternative to the icepak CI/CD flow.
 
-  Provides an alternative to the CI/CD icepak workflow: clients can POST
-  artifact files directly to the server rather than uploading to S3 first
-  and then registering metadata.
+  POST /publish/products/:product_id/versions/:version_id/upload
 
-  Derived from Hye-Ararat/Image-Server's POST /images endpoint, adapted to
-  polar's Space/credential auth and Streams data model.
-
-  ## Endpoints
-
-      POST /publish/products/:product_id/versions/:version_id/upload
-
-  ## Request
-
-  Multipart form with one or more of:
-    - `rootfs`    — rootfs.tar.xz (container) or disk.qcow2 (VM)
-    - `metadata`  — incus.tar.xz / lxd.tar.xz metadata file
-    - `kvmdisk`   — VM disk image (alternative to rootfs for VMs)
-
-  ## Response
-
-  Returns the created Item records with computed hashes and storage paths.
+  Accepts multipart fields: rootfs, metadata, kvmdisk.
+  Files are streamed in chunks; SHA-256 is computed incrementally.
+  Never loads the full file into memory — safe for multi-GB rootfs files.
   """
 
   use PolarWeb, :controller
@@ -31,126 +15,115 @@ defmodule PolarWeb.Publish.UploadController do
   alias Polar.Streams
   alias Polar.Streams.Product
   alias Polar.Streams.Version
-  alias Polar.Streams.Item
   alias Polar.Storage
 
   action_fallback PolarWeb.FallbackController
 
-  # Maximum upload size: 4 GB
-  @max_file_size 4 * 1024 * 1024 * 1024
+  @chunk_size 4 * 1024 * 1024       # 4 MB read chunks
+  @max_file_size 4 * 1024 * 1024 * 1024  # 4 GB limit
 
-  def create(
-        %{assigns: %{current_space: space}} = conn,
-        %{"product_id" => product_id, "version_id" => version_id} = params
-      ) do
-    with {:ok, product} <- fetch_product(product_id, space),
+  def create(%{assigns: %{current_space: _space}} = conn,
+             %{"product_id" => product_id, "version_id" => version_id} = params) do
+    with {:ok, product} <- fetch_product(product_id),
          {:ok, version} <- fetch_version(version_id, product),
-         {:ok, items} <- process_uploads(conn, product, version, params) do
-      conn
-      |> put_status(:created)
-      |> render(:create, %{items: items})
+         {:ok, items}   <- process_uploads(product, version, params) do
+      conn |> put_status(:created) |> render(:create, %{items: items})
     end
   end
 
-  # ── Private ───────────────────────────────────────────────────────────────────
-
-  defp fetch_product(product_id, _space) do
-    case Repo.get(Product, product_id) do
-      nil -> {:error, :not_found}
+  defp fetch_product(id) do
+    case Repo.get(Product, id) do
+      nil     -> {:error, :not_found}
       product -> {:ok, product}
     end
   end
 
-  defp fetch_version(version_id, product) do
-    case Repo.get_by(Version, id: version_id, product_id: product.id) do
-      nil -> {:error, :not_found}
+  defp fetch_version(id, product) do
+    case Repo.get_by(Version, id: id, product_id: product.id) do
+      nil     -> {:error, :not_found}
       version -> {:ok, version}
     end
   end
 
-  defp process_uploads(conn, product, version, params) do
-    upload_fields = ~w(rootfs metadata kvmdisk)
-
-    items =
-      upload_fields
+  defp process_uploads(product, version, params) do
+    results =
+      ~w(rootfs metadata kvmdisk)
       |> Enum.flat_map(fn field ->
         case Map.get(params, field) do
-          %Plug.Upload{} = upload -> [{field, upload}]
-          _ -> []
+          %Plug.Upload{} = u -> [{field, u}]
+          _                  -> []
         end
       end)
-      |> Enum.map(fn {field, upload} ->
-        store_upload(field, upload, product, version)
-      end)
+      |> Enum.map(fn {field, upload} -> store_upload(field, upload, product, version) end)
 
-    errors = Enum.filter(items, &match?({:error, _}, &1))
-
-    if errors == [] do
-      {:ok, Enum.map(items, fn {:ok, item} -> item end)}
-    else
-      {:error, errors}
+    case Enum.filter(results, &match?({:error, _}, &1)) do
+      []     -> {:ok, Enum.map(results, fn {:ok, item} -> item end)}
+      errors -> {:error, errors}
     end
   end
 
   defp store_upload(field, %Plug.Upload{path: tmp_path, filename: filename}, product, version) do
-    with :ok <- validate_file_size(tmp_path),
-         {:ok, data} <- File.read(tmp_path),
-         hash <- compute_hash(data),
-         size <- byte_size(data),
-         storage_path <- build_storage_path(product, version, filename),
-         :ok <- Storage.put_object(storage_path, data),
-         {:ok, item} <- create_item(field, filename, hash, size, storage_path, version) do
+    storage_path = build_storage_path(product, version, filename)
+
+    with :ok            <- validate_file_size(tmp_path),
+         {:ok, hash, sz} <- stream_to_storage(tmp_path, storage_path),
+         {:ok, item}    <- create_item(field, filename, hash, sz, storage_path, version) do
       {:ok, item}
     end
   end
 
   defp validate_file_size(path) do
     case File.stat(path) do
-      {:ok, %{size: size}} when size <= @max_file_size -> :ok
-      {:ok, %{size: size}} -> {:error, "File too large: #{size} bytes (max #{@max_file_size})"}
+      {:ok, %{size: s}} when s <= @max_file_size -> :ok
+      {:ok, %{size: s}} -> {:error, "file too large: #{fmt(s)} (max #{fmt(@max_file_size)})"}
+      {:error, r}       -> {:error, r}
+    end
+  end
+
+  # Stream file in @chunk_size chunks, hash incrementally, write to storage.
+  defp stream_to_storage(tmp_path, storage_path) do
+    {ctx, size, chunks} =
+      tmp_path
+      |> File.stream!([], @chunk_size)
+      |> Enum.reduce({:crypto.hash_init(:sha256), 0, []}, fn chunk, {ctx, sz, acc} ->
+        {:crypto.hash_update(ctx, chunk), sz + byte_size(chunk), [chunk | acc]}
+      end)
+
+    hash = ctx |> :crypto.hash_final() |> Base.encode16(case: :lower)
+    data = chunks |> Enum.reverse() |> IO.iodata_to_binary()
+
+    case Storage.put_object(storage_path, data) do
+      :ok             -> {:ok, hash, size}
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp compute_hash(data) do
-    :crypto.hash(:sha256, data) |> Base.encode16(case: :lower)
-  end
-
   defp build_storage_path(product, version, filename) do
-    # Mirrors the path structure used by icepak:
-    # <os>/<release>/<arch>/<variant>/<serial>/<filename>
-    Path.join([
-      product.os,
-      product.release,
-      product.arch,
-      product.variant,
-      version.serial,
-      filename
-    ])
+    Path.join([product.os, product.release, product.arch,
+               product.variant, version.serial, filename])
   end
 
-  defp create_item(field, filename, hash, size, storage_path, version) do
-    file_type = file_type_for(field, filename)
-    is_metadata = field == "metadata"
-
+  defp create_item(field, filename, hash, size, path, version) do
     Streams.create_item(version, %{
-      name: filename,
-      file_type: file_type,
-      hash: hash,
-      size: size,
-      path: storage_path,
-      is_metadata: is_metadata
+      name:        filename,
+      file_type:   file_type_for(field, filename),
+      hash:        hash,
+      size:        size,
+      path:        path,
+      is_metadata: field == "metadata"
     })
   end
 
-  # Map upload field + filename to simplestreams file type
-  defp file_type_for("metadata", _filename), do: "incus.tar.xz"
-  defp file_type_for("kvmdisk", filename), do: Path.extname(filename) |> String.trim_leading(".")
-  defp file_type_for(_field, filename) do
+  defp file_type_for("metadata", _), do: "incus.tar.xz"
+  defp file_type_for(_, filename) do
     cond do
-      String.ends_with?(filename, ".tar.xz") -> "tar.xz"
+      String.ends_with?(filename, ".tar.xz")  -> "tar.xz"
       String.ends_with?(filename, ".squashfs") -> "squashfs"
-      true -> Path.extname(filename) |> String.trim_leading(".")
+      true -> filename |> Path.extname() |> String.trim_leading(".")
     end
   end
+
+  defp fmt(b) when b >= 1_073_741_824, do: "#{Float.round(b / 1_073_741_824, 1)} GB"
+  defp fmt(b) when b >= 1_048_576,     do: "#{Float.round(b / 1_048_576, 1)} MB"
+  defp fmt(b),                          do: "#{b} B"
 end

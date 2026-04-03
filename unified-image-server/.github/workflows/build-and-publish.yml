@@ -1,0 +1,309 @@
+name: Build, Publish & Verify Images
+
+# Runs on push to main (manifest changes) or weekly to pick up upstream
+# distro releases. Can also be triggered manually for a specific distro/arch.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'manifests/**'
+  schedule:
+    - cron: '0 3 * * 1'   # Monday 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      distro:
+        description: 'Distro manifest to build (e.g. ubuntu, debian, alpine). Leave empty to build all.'
+        required: false
+        default: ''
+      arch:
+        description: 'Target architecture (amd64 or arm64)'
+        required: false
+        default: 'amd64'
+
+jobs:
+  # ── 1. Determine which manifests to build ──────────────────────────────────
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.set.outputs.include }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: set
+        run: |
+          if [ -n "${{ github.event.inputs.distro }}" ]; then
+            # Single distro requested via manual dispatch
+            DISTRO="${{ github.event.inputs.distro }}"
+            ARCH="${{ github.event.inputs.arch || 'amd64' }}"
+            echo "include=[{\"distro\":\"${DISTRO}\",\"arch\":\"${ARCH}\"}]" >> "$GITHUB_OUTPUT"
+          else
+            # Build all standard Distrobuilder manifests for amd64 + arm64
+            echo 'include=[
+              {"distro":"ubuntu",      "arch":"amd64"},
+              {"distro":"ubuntu",      "arch":"arm64"},
+              {"distro":"debian",      "arch":"amd64"},
+              {"distro":"debian",      "arch":"arm64"},
+              {"distro":"alpine",      "arch":"amd64"},
+              {"distro":"alpine",      "arch":"arm64"},
+              {"distro":"archlinux",   "arch":"amd64"},
+              {"distro":"fedora",      "arch":"amd64"},
+              {"distro":"fedora",      "arch":"arm64"},
+              {"distro":"almalinux",   "arch":"amd64"},
+              {"distro":"almalinux",   "arch":"arm64"},
+              {"distro":"rockylinux",  "arch":"amd64"},
+              {"distro":"rockylinux",  "arch":"arm64"},
+              {"distro":"opensuse",    "arch":"amd64"},
+              {"distro":"gentoo-ctr-openrc",  "arch":"amd64"},
+              {"distro":"gentoo-ctr-systemd", "arch":"amd64"}
+            ]' >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── 2. Build images with Distrobuilder ────────────────────────────────────
+  build:
+    needs: matrix
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-latest' || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.matrix.outputs.include) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install distrobuilder
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            debootstrap squashfs-tools gpg curl xz-utils
+          go install github.com/lxc/distrobuilder/distrobuilder@latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: Set up QEMU (arm64 builds on amd64 runners)
+        if: matrix.arch == 'arm64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Resolve manifest path
+        id: manifest
+        run: |
+          DISTRO="${{ matrix.distro }}"
+          if [[ "$DISTRO" == gentoo-* ]]; then
+            VARIANT="${DISTRO#gentoo-}"   # ctr-openrc, ctr-systemd, etc.
+            echo "path=manifests/gentoo/${VARIANT}.yaml" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=manifests/${DISTRO}.yml" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build image
+        run: |
+          mkdir -p /tmp/image-output
+          sudo distrobuilder build-incus "${{ steps.manifest.outputs.path }}" \
+            -o image.architecture=${{ matrix.arch }} \
+            --type unified \
+            /tmp/image-output
+        timeout-minutes: 120
+
+      - name: Compute serial
+        id: serial
+        run: echo "serial=$(date +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-${{ matrix.distro }}-${{ matrix.arch }}-${{ steps.serial.outputs.serial }}
+          path: /tmp/image-output/
+          retention-days: 1
+
+  # ── 3. Build ChromiumOS + Talos wrapper images ────────────────────────────
+  build-wrappers:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - script: build-chromiumos-image.sh
+            board: reven
+            arch: amd64
+          - script: build-talos-image.sh
+            arch: amd64
+          - script: build-talos-image.sh
+            arch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build ${{ matrix.script }} (${{ matrix.arch }})
+        run: |
+          mkdir -p /tmp/image-output
+          ARGS="--arch ${{ matrix.arch }} --output /tmp/image-output"
+          if [ -n "${{ matrix.board }}" ]; then
+            ARGS="$ARGS --board ${{ matrix.board }}"
+          fi
+          bash manifests/bin/${{ matrix.script }} $ARGS
+        timeout-minutes: 30
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-wrapper-${{ matrix.script }}-${{ matrix.arch }}
+          path: /tmp/image-output/
+          retention-days: 1
+
+  # ── 4. Publish all built images to the image server ──────────────────────
+  publish:
+    needs: [build, build-wrappers]
+    runs-on: ubuntu-latest
+    if: ${{ always() && (needs.build.result == 'success' || needs.build-wrappers.result == 'success') }}
+    env:
+      SERVER_URL: ${{ secrets.IMAGE_SERVER_URL }}
+      PUBLISH_TOKEN: ${{ secrets.IMAGE_SERVER_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all image artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/artifacts
+          pattern: image-*
+
+      - name: Publish images to server
+        run: |
+          set -euo pipefail
+
+          for artifact_dir in /tmp/artifacts/image-*/; do
+            # Parse distro, arch, serial from artifact directory name
+            # Format: image-<distro>-<arch>-<serial> or image-wrapper-<script>-<arch>
+            dirname="$(basename "$artifact_dir")"
+            echo "==> Publishing: $dirname"
+
+            # Find rootfs and metadata tarballs
+            rootfs="$(find "$artifact_dir" -name 'rootfs.tar.xz' | head -1)"
+            metadata="$(find "$artifact_dir" -name 'metadata.tar.xz' | head -1)"
+
+            if [ -z "$rootfs" ] || [ -z "$metadata" ]; then
+              echo "    Skipping — missing rootfs or metadata"
+              continue
+            fi
+
+            # Extract image properties from metadata.yaml
+            meta_yaml="$(find "$artifact_dir" -name 'metadata.yaml' | head -1)"
+            if [ -n "$meta_yaml" ]; then
+              OS="$(grep '^  os:' "$meta_yaml" | awk '{print $2}' | tr -d '"')"
+              RELEASE="$(grep '^  release:' "$meta_yaml" | awk '{print $2}' | tr -d '"')"
+              ARCH="$(grep '^  architecture:' "$meta_yaml" | awk '{print $2}' | tr -d '"')"
+              VARIANT="$(grep '^  variant:' "$meta_yaml" | awk '{print $2}' | tr -d '"')"
+              SERIAL="$(grep '^  serial:' "$meta_yaml" | awk '{print $2}' | tr -d '"')"
+            else
+              # Fall back to parsing artifact dir name
+              OS="$(echo "$dirname" | cut -d'-' -f2)"
+              ARCH="$(echo "$dirname" | rev | cut -d'-' -f2 | rev)"
+              RELEASE="current"
+              VARIANT="default"
+              SERIAL="$(date +%Y%m%d)"
+            fi
+
+            echo "    OS=$OS RELEASE=$RELEASE ARCH=$ARCH VARIANT=$VARIANT SERIAL=$SERIAL"
+
+            # Get or create product
+            PRODUCT_RESP=$(curl -sf -X GET \
+              -H "Authorization: Bearer $PUBLISH_TOKEN" \
+              "$SERVER_URL/publish/products/$OS-$RELEASE-$ARCH-$VARIANT" || echo '{}')
+            PRODUCT_ID=$(echo "$PRODUCT_RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('data',{}).get('id',''))" 2>/dev/null || echo '')
+
+            if [ -z "$PRODUCT_ID" ]; then
+              echo "    Product not found — skipping (create products via the dashboard first)"
+              continue
+            fi
+
+            # Create version
+            VERSION_RESP=$(curl -sf -X POST \
+              -H "Authorization: Bearer $PUBLISH_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"version\":{\"serial\":\"$SERIAL\"}}" \
+              "$SERVER_URL/publish/products/$PRODUCT_ID/versions")
+            VERSION_ID=$(echo "$VERSION_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['id'])")
+
+            # Upload files via direct upload endpoint
+            curl -sf -X POST \
+              -H "Authorization: Bearer $PUBLISH_TOKEN" \
+              -F "rootfs=@$rootfs" \
+              -F "metadata=@$metadata" \
+              "$SERVER_URL/publish/products/$PRODUCT_ID/versions/$VERSION_ID/upload"
+
+            echo "    Published version $VERSION_ID"
+          done
+
+  # ── 5. Verify simplestreams index ─────────────────────────────────────────
+  verify:
+    needs: publish
+    runs-on: ubuntu-latest
+    env:
+      SERVER_URL: ${{ secrets.IMAGE_SERVER_URL }}
+      SPACE_TOKEN: ${{ secrets.IMAGE_SERVER_SPACE_TOKEN }}
+
+    steps:
+      - name: Fetch simplestreams index
+        run: |
+          set -euo pipefail
+
+          echo "==> Fetching index.json"
+          INDEX=$(curl -sf "$SERVER_URL/spaces/$SPACE_TOKEN/streams/v1/index.json")
+          echo "$INDEX" | python3 -m json.tool > /dev/null
+          echo "    index.json: valid JSON"
+
+          echo "==> Fetching images.json"
+          IMAGES=$(curl -sf "$SERVER_URL/spaces/$SPACE_TOKEN/streams/v1/images.json")
+          echo "$IMAGES" | python3 -m json.tool > /dev/null
+          echo "    images.json: valid JSON"
+
+          # Verify at least one product is present
+          PRODUCT_COUNT=$(echo "$IMAGES" | python3 -c "
+          import json, sys
+          d = json.load(sys.stdin)
+          products = d.get('products', {})
+          print(len(products))
+          ")
+          echo "    Products in index: $PRODUCT_COUNT"
+
+          if [ "$PRODUCT_COUNT" -eq 0 ]; then
+            echo "ERROR: No products found in simplestreams index after publish"
+            exit 1
+          fi
+
+          # Verify each product has at least one version with items
+          MISSING=$(echo "$IMAGES" | python3 -c "
+          import json, sys
+          d = json.load(sys.stdin)
+          missing = []
+          for key, product in d.get('products', {}).items():
+              versions = product.get('versions', {})
+              if not versions:
+                  missing.append(key)
+                  continue
+              for vkey, version in versions.items():
+                  items = version.get('items', {})
+                  if not items:
+                      missing.append(f'{key}/{vkey}')
+          print('\n'.join(missing))
+          ")
+
+          if [ -n "$MISSING" ]; then
+            echo "WARNING: Products/versions with no items:"
+            echo "$MISSING"
+          fi
+
+          echo "==> Simplestreams index verified"
+
+      - name: Test image pull with incus (smoke test)
+        if: ${{ vars.INCUS_SMOKE_TEST == 'true' }}
+        run: |
+          # Optional: only runs if INCUS_SMOKE_TEST variable is set to 'true'
+          # Requires a self-hosted runner with incus installed.
+          incus remote add incus-image-server \
+            "$SERVER_URL/spaces/$SPACE_TOKEN" \
+            --protocol simplestreams \
+            --public
+          incus image list incus-image-server:
+          incus remote remove incus-image-server
