@@ -293,13 +293,26 @@ export default class ChromiumOS {
   /**
    * Returns true if a full Portage tree is available.
    * True in stage3 containers and cros_sdk chroots.
+   *
+   * Detection strategy (in priority order):
+   *   1. /etc/portage/repos.conf — present in stage3 containers; the overlay
+   *      paths it references (/mnt/host/source/...) may not exist at container
+   *      runtime, but repos.conf itself is always written by build.sh.
+   *   2. /mnt/host/source/src/third_party/chromiumos-overlay — inside cros_sdk.
+   *   3. /var/db/repos/gentoo — standard Gentoo (not ChromiumOS, but emerge works).
+   *   4. /build — cros_sdk board sysroot.
+   *
+   * Note: /var/db/repos/gentoo is NOT present in ChromiumOS stage3 containers —
+   * ChromiumOS uses chromiumos-overlay, not the standard Gentoo tree.
    */
   static hasPortage(): boolean {
+    if (!Utils.commandExists('emerge')) return false
+
     return (
-      Utils.commandExists('emerge') &&
-      (fs.existsSync('/var/db/repos/gentoo') ||
-        fs.existsSync('/mnt/host/source/src/third_party/chromiumos-overlay') ||
-        fs.existsSync('/build'))
+      fs.existsSync('/etc/portage/repos.conf') ||
+      fs.existsSync('/mnt/host/source/src/third_party/chromiumos-overlay') ||
+      fs.existsSync('/var/db/repos/gentoo') ||
+      fs.existsSync('/build')
     )
   }
 

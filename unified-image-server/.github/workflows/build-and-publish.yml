@@ -206,14 +206,21 @@ jobs:
 
             echo "    OS=$OS RELEASE=$RELEASE ARCH=$ARCH VARIANT=$VARIANT SERIAL=$SERIAL"
 
-            # Get or create product
+            # Look up product by aliases key (polar's ProductController.show uses
+            # Streams.get_product/1 → Product.by_key/2 which matches on aliases or os).
+            # The aliases field is set to "<os>/<release>/<arch>/<variant>" by convention.
+            PRODUCT_KEY="$OS/$RELEASE/$ARCH/$VARIANT"
             PRODUCT_RESP=$(curl -sf -X GET \
               -H "Authorization: Bearer $PUBLISH_TOKEN" \
-              "$SERVER_URL/publish/products/$OS-$RELEASE-$ARCH-$VARIANT" || echo '{}')
-            PRODUCT_ID=$(echo "$PRODUCT_RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('data',{}).get('id',''))" 2>/dev/null || echo '')
+              "$SERVER_URL/publish/products/$(python3 -c "import urllib.parse; print(urllib.parse.quote('$PRODUCT_KEY', safe=''))")" \
+              || echo '{}')
+            PRODUCT_ID=$(echo "$PRODUCT_RESP" | python3 -c \
+              "import json,sys; d=json.load(sys.stdin); print(d.get('data',{}).get('id',''))" \
+              2>/dev/null || echo '')
 
             if [ -z "$PRODUCT_ID" ]; then
-              echo "    Product not found — skipping (create products via the dashboard first)"
+              echo "    Product not found for key '$PRODUCT_KEY' — skipping."
+              echo "    Create the product via the dashboard or API first, then re-run."
               continue
             fi
 

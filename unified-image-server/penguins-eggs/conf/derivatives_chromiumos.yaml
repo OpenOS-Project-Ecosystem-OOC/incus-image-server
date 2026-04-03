@@ -6,7 +6,10 @@
 #   1. Primary switch on distroId (handles the most common names directly)
 #   2. This file (handles less common derivatives and future forks)
 #
-# To add a new ChromiumOS derivative, append its ID here — no code change needed.
+# Board name alignment:
+#   Entries below must match the BOARD values written to
+#   /etc/chromiumos-stage3-board by chromiumos-stage3/build.sh, which are
+#   sourced from the BOARD= line in each boards/*.conf file.
 ---
 # Upstream / reference builds
 - ChromiumOS
@@ -31,19 +34,26 @@
 # Brunch (ChromiumOS on generic x86 hardware)
 - Brunch
 
-# ChromiumOS stage3 build environments (from this project's chromiumos-stage3)
+# ChromiumOS stage3 build environments (from chromiumos-stage3/)
 # These run inside Incus containers and identify as ChromiumOS family.
+# The variant string matches what detectVariant() returns when
+# /etc/os-release contains 'stage3'.
 - ChromiumOS-stage3
 - Chromiumos-stage3
 
-# Hardware-specific openFyde boards
-# These set ID in /etc/os-release to the board name.
-- rpi4-openfyde
-- rpi5-openfyde
-- rock5b-openfyde
-- rockpi4b-openfyde
+# openFyde hardware board BOARD values (written to /etc/chromiumos-stage3-board
+# by build.sh; also set as CHROMEOS_RELEASE_BOARD in /etc/lsb-release on
+# running openFyde systems).
+# Source of truth: chromiumos-stage3/boards/*.conf BOARD= lines.
+- reven                   # amd64 generic (boards/reven.conf)
+- arm64-generic           # arm64 generic (boards/arm64-generic.conf)
+- rpi4-openfyde           # Raspberry Pi 4B/400 (boards/rpi4.conf)
+- rpi5-openfyde           # Raspberry Pi 5 (boards/rpi5.conf)
+- rock5b-openfyde         # ROCK 5B, RK3588S (boards/rk3588.conf)
+- rockpi4b-openfyde       # Rock Pi 4B, RK3399 (boards/rk3399.conf)
+- orangepi5-openfyde      # Orange Pi 5/5B/5 Plus, RK3588S (boards/orangepi5.conf)
+# Additional openFyde boards not yet in chromiumos-stage3/boards/ but present
+# on running openFyde systems:
 - rock4cp-openfyde
-- orangepi5-openfyde
 - firefly-rk3588spc-openfyde
 - firefly-itx3588j-openfyde
-- arm64-openfyde
