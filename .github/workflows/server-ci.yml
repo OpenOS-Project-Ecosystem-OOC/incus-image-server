@@ -44,10 +44,10 @@ jobs:
         id: mix-cache
         with:
           path: |
-            server/deps
-            server/_build
-            server/priv/plts
-          key: ${{ runner.os }}-polar-${{ hashFiles('server/mix.lock') }}
+            unified-image-server/server/deps
+            unified-image-server/server/_build
+            unified-image-server/server/priv/plts
+          key: ${{ runner.os }}-polar-${{ hashFiles('unified-image-server/server/mix.lock') }}
 
       - name: Install Dependencies
         if: steps.mix-cache.outputs.cache-hit != 'true'
@@ -88,10 +88,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            server/deps
-            server/_build
-            server/priv/plts
-          key: ${{ runner.os }}-polar-${{ hashFiles('server/mix.lock') }}
+            unified-image-server/server/deps
+            unified-image-server/server/_build
+            unified-image-server/server/priv/plts
+          key: ${{ runner.os }}-polar-${{ hashFiles('unified-image-server/server/mix.lock') }}
 
       - name: Check Code Format
         run: mix format --check-formatted
@@ -142,10 +142,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            server/deps
-            server/_build
-            server/priv/plts
-          key: ${{ runner.os }}-polar-${{ hashFiles('server/mix.lock') }}
+            unified-image-server/server/deps
+            unified-image-server/server/_build
+            unified-image-server/server/priv/plts
+          key: ${{ runner.os }}-polar-${{ hashFiles('unified-image-server/server/mix.lock') }}
 
       - name: Run Tests
         run: mix test --trace --slowest 10
