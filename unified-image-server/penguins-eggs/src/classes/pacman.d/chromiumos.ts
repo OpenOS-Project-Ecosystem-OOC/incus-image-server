@@ -1,7 +1,7 @@
 /**
  * ./src/classes/pacman.d/chromiumos.ts
  * penguins-eggs / ecmascript 2020
- * author: Piero Proietti (original), unified-image-server contributors
+ * author: Piero Proietti (original), incus-image-server contributors
  * license: MIT
  *
  * ChromiumOS family package manager backend.

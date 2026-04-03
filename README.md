@@ -1,4 +1,4 @@
-# unified-image-server
+# incus-image-server
 
 A unified simplestreams image server for LXC/LXD/Incus, with a multi-distro
 build pipeline and live-ISO remastering support.
@@ -7,11 +7,10 @@ build pipeline and live-ISO remastering support.
 
 ```
 incus-image-server/
-└── unified-image-server/
-    ├── server/              # Elixir/Phoenix simplestreams server (polar base)
-    ├── manifests/           # Distrobuilder YAMLs + wrapper scripts
-    ├── chromiumos-stage3/   # Arch-agnostic ChromiumOS stage3 builder
-    └── penguins-eggs/       # ChromiumOS family support for penguins-eggs
+├── server/              # Elixir/Phoenix simplestreams server (polar base)
+├── manifests/           # Distrobuilder YAMLs + wrapper scripts
+├── chromiumos-stage3/   # Arch-agnostic ChromiumOS stage3 builder
+└── penguins-eggs/       # ChromiumOS family support for penguins-eggs
 ```
 
 ## Components
