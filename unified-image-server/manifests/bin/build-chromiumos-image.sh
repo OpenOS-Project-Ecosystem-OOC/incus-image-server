@@ -34,7 +34,7 @@ STAGE3_REPO="${STAGE3_REPO:-}"  # override for self-hosted releases
 STAGE3_GITHUB_REPO="sebanc/chromiumos-stage3"
 # This project's own releases publish arm64 stage3 tarballs built by
 # chromiumos-stage3/.github/workflows/build.yml
-THIS_GITHUB_REPO="${THIS_GITHUB_REPO:-Interested-Deving-1896/incus-image-server}"
+THIS_GITHUB_REPO="${THIS_GITHUB_REPO:-OpenOS-Project-Ecosystem-OOC/incus-image-server}"
 
 ARCH_OVERRIDE=""
 
