@@ -62,4 +62,4 @@ See [demo-server/README.md](demo-server/README.md) for setup instructions.
 | manifests/gentoo/ | liangyongxiang/my-gentoo-incus-scripts |
 | chromiumos-stage3 (amd64) | sebanc/chromiumos-stage3 |
 | chromiumos-stage3 (arm64) | openFyde overlays |
-| penguins-eggs distro matrix | Interested-Deving-1896/penguins-eggs |
+| penguins-eggs distro matrix | OpenOS-Project-Ecosystem-OOC/penguins-eggs |
