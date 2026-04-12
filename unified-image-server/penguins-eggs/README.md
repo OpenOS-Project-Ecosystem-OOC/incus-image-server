@@ -4,7 +4,7 @@ ChromiumOS family integration for [penguins-eggs](https://github.com/pieroproiet
 the live-ISO remastering tool.
 
 These files are drop-in additions for the `all-features` branch of
-[Interested-Deving-1896/penguins-eggs](https://github.com/Interested-Deving-1896/penguins-eggs).
+[OpenOS-Project-Ecosystem-OOC/penguins-eggs](https://github.com/OpenOS-Project-Ecosystem-OOC/penguins-eggs).
 They are not standalone — they are imported at runtime by `src/classes/ovary.d/produce.ts`
 in that branch.
 
