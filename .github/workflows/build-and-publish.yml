@@ -98,6 +98,7 @@ jobs:
       - name: Build image
         run: |
           mkdir -p /tmp/image-output
+          sudo losetup -f  # Find a free loop device
           sudo distrobuilder build-incus "${{ steps.manifest.outputs.path }}" \
             -o image.architecture=${{ matrix.arch }} \
             --type unified \
